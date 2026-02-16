@@ -21,20 +21,43 @@ export default function App() {
   const PLANTS_COUNT = 1;
   const SITE_NAME = "HIT Project";
 
+  const API_BASE = "https://hit-solar-backend.onrender.com";
+
   const [powerData, setPowerData] = useState([]);
   const [meta, setMeta] = useState(null);
+
+  // ✅ helps us prove "live" + force charts to re-render
+  const [lastUpdated, setLastUpdated] = useState(Date.now());
+  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let interval;
 
     const fetchLive = async () => {
       try {
-        // ✅ Firebase Hosting will rewrite /api/* to your Cloud Function
-        const res = await fetch("/api/power?site=hit");
+        // ✅ cache-buster query so every request is unique
+        const url = `${API_BASE}/api/power?ts=${Date.now()}`;
+
+        const res = await fetch(url, {
+          cache: "no-store",
+          headers: {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            Pragma: "no-cache",
+            Expires: "0",
+          },
+        });
+
         const json = await res.json();
 
-        if (Array.isArray(json?.data)) setPowerData(json.data);
-        if (json?.meta) setMeta(json.meta);
+        if (Array.isArray(json?.data)) {
+          // ✅ force a new array reference every time
+          setPowerData([...json.data]);
+        }
+        if (json?.meta) setMeta({ ...json.meta });
+
+        // ✅ update timestamps to prove the UI is changing
+        setLastUpdated(Date.now());
+        setTick((t) => t + 1);
       } catch (err) {
         console.error("Live fetch failed:", err);
       }
@@ -150,7 +173,12 @@ export default function App() {
         active: month === 0,
         icon: "☀️",
       },
-      { month: "Feb", value: month === 1 ? febLive : 0, active: month === 1, icon: "⛅" },
+      {
+        month: "Feb",
+        value: month === 1 ? febLive : 0,
+        active: month === 1,
+        icon: "⛅",
+      },
       { month: "Mar", value: 0, active: month === 2, icon: "🌧️" },
       { month: "Apr", value: 0, active: month === 3, icon: "🌦️" },
     ];
@@ -205,6 +233,7 @@ export default function App() {
             </div>
           )}
 
+          {/* TOP SUMMARY CARD */}
           <div className="bg-white rounded-2xl shadow p-5">
             <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-6">
               <div className="flex items-start gap-6">
@@ -248,6 +277,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Revenue cards */}
             <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-gray-50 border rounded-2xl p-4">
                 <p className="text-xs text-gray-500">
@@ -280,6 +310,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Extra info row */}
             <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-gray-50 border rounded-2xl p-4">
                 <p className="text-xs text-gray-500">Energy Sold to ZESA (kWh)</p>
@@ -299,8 +330,12 @@ export default function App() {
                 <p className="text-xs text-gray-500">Live Stream</p>
                 <div className="mt-2 flex items-center justify-between">
                   <div>
-                    <p className="text-lg font-bold text-gray-800">{meta?.nowHHMM || latest.time}</p>
-                    <p className="text-xs text-gray-500">Updates every 2 seconds</p>
+                    <p className="text-lg font-bold text-gray-800">
+                      {meta?.nowHHMM || latest.time}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Updated: {new Date(lastUpdated).toLocaleTimeString()} (tick {tick})
+                    </p>
                   </div>
                   <div>
                     <p className="text-lg font-bold text-gray-800">{Number(latest.solar || 0).toFixed(2)} kW</p>
@@ -311,6 +346,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* KPI GRID */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
             <KPICard title="Total Energy Generated" value={totalEnergyMWh.toFixed(3)} unit="MWh" trend="Live" trendPositive />
             <KPICard title="Peak Solar Output" value={Number(peakSolar || 0).toFixed(2)} unit="kW" trend="Live" trendPositive />
@@ -320,6 +356,7 @@ export default function App() {
             <KPICard title="Revenue Today" value={Number(revenueTodayUSD).toFixed(2)} unit="$" trend="ZESA" trendPositive />
           </div>
 
+          {/* PERFORMANCE + MONTHLY */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             <div className="xl:col-span-2 bg-white rounded-2xl shadow p-5 min-w-0">
               <div className="flex items-center justify-between mb-4">
@@ -329,7 +366,8 @@ export default function App() {
 
               <div style={{ width: "100%", height: 320, minHeight: 320 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={safePowerData}>
+                  {/* ✅ key forces redraw when tick changes */}
+                  <LineChart data={safePowerData} key={tick}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" />
                     <YAxis />
@@ -345,7 +383,9 @@ export default function App() {
             <div className="bg-white rounded-2xl shadow p-5 min-w-0">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold">Monthly Generation</h2>
-                <span className="text-xs text-gray-500">⚡ {Number((meta?.avgDailyKWh ?? 0) * 30).toFixed(0)} kWh / 30d (avg)</span>
+                <span className="text-xs text-gray-500">
+                  ⚡ {Number((meta?.avgDailyKWh ?? 0) * 30).toFixed(0)} kWh / 30d (avg)
+                </span>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -365,6 +405,7 @@ export default function App() {
             </div>
           </div>
 
+          {/* INFORMATION + MAP */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
             <div className="xl:col-span-2 bg-white rounded-2xl shadow p-5 min-w-0">
               <h2 className="text-lg font-semibold mb-4">Information</h2>
@@ -437,13 +478,14 @@ export default function App() {
             </div>
           </div>
 
+          {/* INVERTER + FAULTS */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
             <div className="bg-white rounded-2xl shadow p-5 min-w-0">
               <h2 className="text-lg font-semibold mb-4">Inverter Output Breakdown</h2>
 
               <div style={{ width: "100%", height: 350, minHeight: 350 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={safePowerData}>
+                  <BarChart data={safePowerData} key={tick}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" />
                     <YAxis />
@@ -462,7 +504,7 @@ export default function App() {
 
               <div style={{ width: "100%", height: 350, minHeight: 350 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={faultDataDerived}>
+                  <BarChart data={faultDataDerived} key={tick}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
                     <YAxis allowDecimals={false} />
@@ -473,7 +515,6 @@ export default function App() {
               </div>
             </div>
           </div>
-
         </main>
       </div>
     </div>
