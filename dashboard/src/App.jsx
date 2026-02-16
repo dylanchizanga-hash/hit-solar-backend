@@ -21,43 +21,24 @@ export default function App() {
   const PLANTS_COUNT = 1;
   const SITE_NAME = "HIT Project";
 
+  // ✅ IMPORTANT: use Render backend
   const API_BASE = "https://hit-solar-backend.onrender.com";
 
   const [powerData, setPowerData] = useState([]);
   const [meta, setMeta] = useState(null);
-
-  // ✅ helps us prove "live" + force charts to re-render
-  const [lastUpdated, setLastUpdated] = useState(Date.now());
-  const [tick, setTick] = useState(0);
 
   useEffect(() => {
     let interval;
 
     const fetchLive = async () => {
       try {
-        // ✅ cache-buster query so every request is unique
-        const url = `${API_BASE}/api/power?ts=${Date.now()}`;
-
-        const res = await fetch(url, {
+        const res = await fetch(`${API_BASE}/api/power?ts=${Date.now()}`, {
           cache: "no-store",
-          headers: {
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            Pragma: "no-cache",
-            Expires: "0",
-          },
         });
-
         const json = await res.json();
 
-        if (Array.isArray(json?.data)) {
-          // ✅ force a new array reference every time
-          setPowerData([...json.data]);
-        }
-        if (json?.meta) setMeta({ ...json.meta });
-
-        // ✅ update timestamps to prove the UI is changing
-        setLastUpdated(Date.now());
-        setTick((t) => t + 1);
+        if (Array.isArray(json?.data)) setPowerData(json.data);
+        if (json?.meta) setMeta(json.meta);
       } catch (err) {
         console.error("Live fetch failed:", err);
       }
@@ -86,34 +67,31 @@ export default function App() {
 
   const latest = safePowerData[safePowerData.length - 1];
 
-  const totalEnergyKWh = meta?.energyTodayKWh ?? 0;
+  // ---- KPIs ----
+  // Approx energy today from streamed samples (kW sampled every 2 minutes)
+  const totalEnergyKWh = useMemo(() => {
+    // each sample is 2 minutes = 2/60 hours
+    const kWh = safePowerData.reduce((s, r) => s + Number(r.solar || 0) * (2 / 60), 0);
+    return kWh;
+  }, [safePowerData]);
+
   const totalEnergyMWh = totalEnergyKWh / 1000;
 
-  const peakSolar =
-    meta?.peakTodayKW ??
-    Math.max(...safePowerData.map((d) => Number(d.solar || 0)));
+  const peakSolar = useMemo(() => {
+    return Math.max(...safePowerData.map((d) => Number(d.solar || 0)), 0);
+  }, [safePowerData]);
 
   const averageBattery = useMemo(() => {
     const sum = safePowerData.reduce((s, d) => s + Number(d.battery || 0), 0);
     return safePowerData.length ? sum / safePowerData.length : 0;
   }, [safePowerData]);
 
-  const averageIrradiance =
-    meta?.avgIrrToday ??
-    safePowerData.reduce((s, d) => s + Number(d.irradiance || 0), 0) /
-      (safePowerData.length || 1);
+  const averageIrradiance = useMemo(() => {
+    const sum = safePowerData.reduce((s, d) => s + Number(d.irradiance || 0), 0);
+    return safePowerData.length ? sum / safePowerData.length : 0;
+  }, [safePowerData]);
 
-  const totalFaults = meta?.derivedFaultsToday ?? 0;
-
-  const SYSTEM_CAPACITY_KW = meta?.capacityKW ?? 1;
-  const efficiency =
-    SYSTEM_CAPACITY_KW > 0
-      ? (Number(latest.solar || 0) / SYSTEM_CAPACITY_KW) * 100
-      : 0;
-  const efficiencyClamped = Math.min(100, Math.max(0, efficiency));
-
-  const availability = totalFaults > 0 ? 90 : 100;
-
+  // ---- Health ----
   const isDaytime = useMemo(() => {
     const t = meta?.nowHHMM || latest.time || "00:00";
     const hour = Number(String(t).split(":")[0]);
@@ -129,13 +107,11 @@ export default function App() {
 
   const critical =
     latestBattery < 20 ||
-    (isDaytime && latestSolar < 10 && latestIrr < 0.02) ||
-    totalFaults >= 2;
+    (isDaytime && latestSolar < 0.05 && latestIrr < 0.05);
 
   const warning =
     latestBattery < 40 ||
-    (isDaytime && latestSolar < 50) ||
-    totalFaults >= 1;
+    (isDaytime && latestSolar < 0.2);
 
   if (critical) {
     systemHealth = "Critical";
@@ -145,45 +121,39 @@ export default function App() {
     healthColor = "bg-yellow-500";
   }
 
-  const showActiveAlarmBanner = systemHealth === "Critical" && totalFaults > 0;
+  // Derived alarm shown only when CRITICAL
+  const showActiveAlarmBanner = systemHealth === "Critical";
 
-  const revenueTodayUSD =
-    meta?.todayRevenueUSD ?? totalEnergyKWh * ZESA_TARIFF_USD_PER_KWH;
+  // ---- Efficiency / PR ----
+  const SYSTEM_CAPACITY_KW = Math.max(1, peakSolar); // avoid divide by zero
+  const efficiency = (latestSolar / SYSTEM_CAPACITY_KW) * 100;
+  const efficiencyClamped = Math.min(100, Math.max(0, efficiency));
 
-  const predictedNext30DaysUSD =
-    meta?.predictedNext30DaysUSD ??
-    (meta?.avgDailyKWh ?? 0) * 30 * ZESA_TARIFF_USD_PER_KWH;
+  // ---- Revenue ----
+  const revenueTodayUSD = totalEnergyKWh * ZESA_TARIFF_USD_PER_KWH;
+  const predictedNext30DaysUSD = revenueTodayUSD * 30; // simple projection (keeps changing as power changes)
 
-  const energySoldToZESA_TodayKWh = 0;
-  const energySoldToZESA_30DaysKWh = 0;
-
+  // ---- Monthly generation rules (Jan fixed, Feb live, Mar/Apr zero) ----
   const monthlyGeneration = useMemo(() => {
     const now = new Date();
-    const month = now.getMonth();
+    const monthIdx = now.getMonth(); // Jan=0, Feb=1
     const dayOfMonth = now.getDate();
-    const avgDaily = meta?.avgDailyKWh ?? 0;
 
-    const janFixed = avgDaily * 31;
-    const febLive = avgDaily * Math.max(1, dayOfMonth);
+    // We only have “live” energy from stream; treat it as “today so far”
+    const todayKWh = totalEnergyKWh;
+
+    const janFixed = monthIdx >= 1 ? todayKWh * 31 : todayKWh * dayOfMonth;
+    const febLive = monthIdx === 1 ? todayKWh * Math.max(1, dayOfMonth) : 0;
 
     return [
-      {
-        month: "Jan",
-        value: month >= 1 ? janFixed : avgDaily * dayOfMonth,
-        active: month === 0,
-        icon: "☀️",
-      },
-      {
-        month: "Feb",
-        value: month === 1 ? febLive : 0,
-        active: month === 1,
-        icon: "⛅",
-      },
-      { month: "Mar", value: 0, active: month === 2, icon: "🌧️" },
-      { month: "Apr", value: 0, active: month === 3, icon: "🌦️" },
+      { month: "Jan", value: monthIdx >= 1 ? janFixed : todayKWh, active: monthIdx === 0, icon: "☀️" },
+      { month: "Feb", value: febLive, active: monthIdx === 1, icon: "⛅" },
+      { month: "Mar", value: 0, active: monthIdx === 2, icon: "🌧️" },
+      { month: "Apr", value: 0, active: monthIdx === 3, icon: "🌦️" },
     ];
-  }, [meta?.avgDailyKWh]);
+  }, [totalEnergyKWh]);
 
+  // ---- Info table ----
   const infoRows = useMemo(
     () => [
       {
@@ -199,9 +169,10 @@ export default function App() {
     [SITE_NAME, systemHealth, averageIrradiance, totalEnergyMWh, averageBattery]
   );
 
+  // ---- Fault chart derived from live ----
   const faultDataDerived = useMemo(() => {
-    const isLowSolar = isDaytime && latestSolar < 10;
-    const isLowIrr = isDaytime && latestIrr < 0.02;
+    const isLowSolar = isDaytime && latestSolar < 0.05;
+    const isLowIrr = isDaytime && latestIrr < 0.05;
     const isLowBattery = latestBattery < 20;
 
     return [
@@ -247,7 +218,7 @@ export default function App() {
 
                   <div className="mt-2 flex flex-wrap gap-4 text-sm text-gray-600">
                     <span>🏭 Plants: {PLANTS_COUNT}</span>
-                    <span>⚡ Capacity: {Number(SYSTEM_CAPACITY_KW).toFixed(2)} kW</span>
+                    <span>⚡ Capacity: {SYSTEM_CAPACITY_KW.toFixed(2)} kW</span>
                     <span>⚡ Generation: {totalEnergyMWh.toFixed(3)} MWh</span>
                     <span>🌍 CO₂ Saved: {Math.max(0, totalEnergyKWh * 0.7).toFixed(0)}</span>
                   </div>
@@ -257,7 +228,7 @@ export default function App() {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div className="bg-gray-50 border rounded-xl px-4 py-3">
                   <p className="text-xs text-gray-500">Total Yield (Today)</p>
-                  <p className="text-lg font-bold text-gray-800">{Number(totalEnergyKWh).toFixed(1)} kWh</p>
+                  <p className="text-lg font-bold text-gray-800">{Number(totalEnergyKWh).toFixed(2)} kWh</p>
                 </div>
 
                 <div className="bg-gray-50 border rounded-xl px-4 py-3">
@@ -267,17 +238,17 @@ export default function App() {
 
                 <div className="bg-gray-50 border rounded-xl px-4 py-3">
                   <p className="text-xs text-gray-500">Fault Events (Derived)</p>
-                  <p className="text-lg font-bold text-gray-800">{totalFaults}</p>
+                  <p className="text-lg font-bold text-gray-800">{faultDataDerived.reduce((s, x) => s + x.faults, 0)}</p>
                 </div>
 
                 <div className="bg-gray-50 border rounded-xl px-4 py-3">
                   <p className="text-xs text-gray-500">Availability</p>
-                  <p className="text-lg font-bold text-gray-800">{availability.toFixed(0)}%</p>
+                  <p className="text-lg font-bold text-gray-800">100%</p>
                 </div>
               </div>
             </div>
 
-            {/* Revenue cards */}
+            {/* Revenue row */}
             <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-gray-50 border rounded-2xl p-4">
                 <p className="text-xs text-gray-500">
@@ -289,7 +260,7 @@ export default function App() {
                     <p className="text-xs text-gray-500">Today (so far)</p>
                   </div>
                   <div>
-                    <p className="text-lg font-bold text-gray-800">{Number(totalEnergyKWh).toFixed(1)} kWh</p>
+                    <p className="text-lg font-bold text-gray-800">{Number(totalEnergyKWh).toFixed(2)} kWh</p>
                     <p className="text-xs text-gray-500">Energy generated</p>
                   </div>
                 </div>
@@ -303,43 +274,8 @@ export default function App() {
                     <p className="text-xs text-gray-500">Next 30 days</p>
                   </div>
                   <div>
-                    <p className="text-lg font-bold text-gray-800">{Number(meta?.predictedNext30DaysKWh ?? 0).toFixed(0)} kWh</p>
-                    <p className="text-xs text-gray-500">Forecast energy</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Extra info row */}
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-gray-50 border rounded-2xl p-4">
-                <p className="text-xs text-gray-500">Energy Sold to ZESA (kWh)</p>
-                <div className="mt-2 flex items-center justify-between">
-                  <div>
-                    <p className="text-lg font-bold text-gray-800">{energySoldToZESA_TodayKWh.toFixed(2)}</p>
-                    <p className="text-xs text-gray-500">Today</p>
-                  </div>
-                  <div>
-                    <p className="text-lg font-bold text-gray-800">{energySoldToZESA_30DaysKWh.toFixed(2)}</p>
-                    <p className="text-xs text-gray-500">Next 30 days</p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-gray-50 border rounded-2xl p-4">
-                <p className="text-xs text-gray-500">Live Stream</p>
-                <div className="mt-2 flex items-center justify-between">
-                  <div>
-                    <p className="text-lg font-bold text-gray-800">
-                      {meta?.nowHHMM || latest.time}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      Updated: {new Date(lastUpdated).toLocaleTimeString()} (tick {tick})
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-lg font-bold text-gray-800">{Number(latest.solar || 0).toFixed(2)} kW</p>
-                    <p className="text-xs text-gray-500">Current output</p>
+                    <p className="text-lg font-bold text-gray-800">{meta?.nowHHMM || latest.time}</p>
+                    <p className="text-xs text-gray-500">Live updates</p>
                   </div>
                 </div>
               </div>
@@ -350,8 +286,8 @@ export default function App() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
             <KPICard title="Total Energy Generated" value={totalEnergyMWh.toFixed(3)} unit="MWh" trend="Live" trendPositive />
             <KPICard title="Peak Solar Output" value={Number(peakSolar || 0).toFixed(2)} unit="kW" trend="Live" trendPositive />
-            <KPICard title="Average Irradiation" value={Number(averageIrradiance || 0).toFixed(2)} unit="W/m²" trend="CSV" trendPositive />
-            <KPICard title="Total Fault Events" value={totalFaults} unit="events" trend="Derived" trendPositive={totalFaults === 0} />
+            <KPICard title="Average Irradiation" value={Number(averageIrradiance || 0).toFixed(2)} unit="—" trend="Live" trendPositive />
+            <KPICard title="Total Fault Events" value={faultDataDerived.reduce((s, x) => s + x.faults, 0)} unit="events" trend="Derived" trendPositive />
             <KPICard title="System Efficiency (PR)" value={efficiencyClamped.toFixed(1)} unit="%" trend="PR" trendPositive={efficiencyClamped > 75} />
             <KPICard title="Revenue Today" value={Number(revenueTodayUSD).toFixed(2)} unit="$" trend="ZESA" trendPositive />
           </div>
@@ -366,15 +302,14 @@ export default function App() {
 
               <div style={{ width: "100%", height: 320, minHeight: 320 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  {/* ✅ key forces redraw when tick changes */}
-                  <LineChart data={safePowerData} key={tick}>
+                  <LineChart data={safePowerData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" />
                     <YAxis />
                     <Tooltip />
                     <Legend />
-                    <Line type="monotone" dataKey="solar" stroke="#2563eb" strokeWidth={3} dot={false} name="Energy Produced (kW)" />
-                    <Line type="monotone" dataKey="battery" stroke="#ef4444" strokeWidth={3} dot={false} name="Battery Level (%)" />
+                    <Line type="monotone" dataKey="solar" stroke="#2563eb" strokeWidth={3} dot={false} name="Solar (kW)" />
+                    <Line type="monotone" dataKey="battery" stroke="#ef4444" strokeWidth={3} dot={false} name="Battery (%)" />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -383,9 +318,7 @@ export default function App() {
             <div className="bg-white rounded-2xl shadow p-5 min-w-0">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-semibold">Monthly Generation</h2>
-                <span className="text-xs text-gray-500">
-                  ⚡ {Number((meta?.avgDailyKWh ?? 0) * 30).toFixed(0)} kWh / 30d (avg)
-                </span>
+                <span className="text-xs text-gray-500">⚡ Live</span>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -485,7 +418,7 @@ export default function App() {
 
               <div style={{ width: "100%", height: 350, minHeight: 350 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={safePowerData} key={tick}>
+                  <BarChart data={safePowerData}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="time" />
                     <YAxis />
@@ -504,7 +437,7 @@ export default function App() {
 
               <div style={{ width: "100%", height: 350, minHeight: 350 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={faultDataDerived} key={tick}>
+                  <BarChart data={faultDataDerived}>
                     <CartesianGrid strokeDasharray="3 3" />
                     <XAxis dataKey="name" />
                     <YAxis allowDecimals={false} />
@@ -515,6 +448,7 @@ export default function App() {
               </div>
             </div>
           </div>
+
         </main>
       </div>
     </div>
